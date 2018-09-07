@@ -11,6 +11,7 @@
 from Nova import Nova
 from Hologram.Event import Event
 from Exceptions.HologramError import NetworkError
+from UtilClasses import Location
 from UtilClasses import ModemResult
 
 DEFAULT_NOVAM_TIMEOUT = 200
@@ -31,6 +32,8 @@ class NovaM(Nova):
             self.is_r410 = False
         else:
             self.is_r410 = True
+        self.last_location = None
+        self._gnss_enabled = False
 
 
     def init_serial_commands(self):
@@ -61,9 +64,40 @@ class NovaM(Nova):
         modemtype = '(R410)' if self.is_r410 else '(R404)'
         return 'Hologram Nova US 4G LTE Cat-M1 Cellular USB Modem ' + modemtype
 
+    def population_location_obj(self, response):
+        response_list = response.split(',')
+        self.last_location = Location(*response_list)
+        return self.last_location
+
+    def _handle_location_urc(self, urc):
+        self.population_location_obj(urc.lstrip('+UULOC: '))
+        self.event.broadcast('location.received')
+
     @property
     def location(self):
-        raise NotImplementedError('The R404 and R410 do not support Cell Locate at this time')
+        temp_loc = self.last_location
+        if not self._gnss_enabled:
+            ok, _ = self.set('+UGPIOC', '23,3')
+            if ok != ModemResult.OK:
+                self.logger.error('Failed to enable GNSS module')
+                return None
+            ok, _ = self.set('+UGPIOC', '24,4')
+            if ok != ModemResult.OK:
+                self.logger.error('Failed to enable GNSS module')
+                return None
+            self._gnss_enabled = True
+
+        if self._set_up_pdp_context():
+            self.last_location = None
+            ok, r = self.set('+ULOC', '2,3,0,10,10')
+            if ok != ModemResult.OK:
+                self.logger.error('Location request failed')
+                return None
+            while self.last_location is None and self._is_pdp_context_active():
+                self.checkURC()
+        if self.last_location is None:
+            self.last_location = temp_loc
+        return self.last_location
 
     @property
     def operator(self):
